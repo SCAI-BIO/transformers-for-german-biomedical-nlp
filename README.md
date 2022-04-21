@@ -49,8 +49,6 @@ and [GGPONC](https://www.leitlinienprogramm-onkologie.de/projekte/ggponc-english
 authors directly, and [the JSynCC repository](https://github.com/JULIELab/jsyncc) provides code to generate the JSynCC
 dataset.
 
-## Dependencies
-
 ## Sharing the pre-trained models
 
 We made our domain-adapted BioGottBERT model available in the Huggingface model hub
