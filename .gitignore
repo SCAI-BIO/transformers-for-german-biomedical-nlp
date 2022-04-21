@@ -1,0 +1,13 @@
+.idea/
+__pycache__/
+mlruns/
+*.egg-info/
+processed/
+raw/
+interim/
+databases/
+external/
+reports/
+models/
+.vscode/
+*.ini
