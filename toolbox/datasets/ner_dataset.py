@@ -17,12 +17,11 @@ import pandas as pd
 import torch
 from pandas import DataFrame
 from tokenizers import Encoding
+from toolbox.datasets import TOKENIZERS
+from toolbox.utils.helpers import TrainerUtils
 from torch import Tensor
 from torch.utils.data import Dataset
 from transformers import BertTokenizerFast
-
-from toolbox.datasets import TOKENIZERS
-from toolbox.utils.helpers import TrainerUtils
 
 # global vars ------------------------------------------------------------------
 
@@ -390,13 +389,40 @@ class NerDataset(Dataset):
             for inner_train_idx, inner_val_idx in TrainerUtils.calculate_splits(
                 train_data, inner_folds
             ):
-                inner_train_data = dataset.subset(inner_train_idx)
-                inner_val_data = dataset.subset(inner_val_idx)
+                inner_train_data = train_data.subset(inner_train_idx)
+                inner_val_data = train_data.subset(inner_val_idx)
                 inner_datasets.append((inner_train_data, inner_val_data))
 
             datasets.append((train_data, val_data, inner_datasets))
 
         return datasets
+
+    def to_dictionaries(self) -> List[Dict]:
+        """Extract sentences from list of training instances"""
+        annotations = []
+        for instance in self.instances:
+            text = instance.text
+            if instance.label_df is not None and instance.label_df.shape[0] > 0:
+                annotation_dict = []
+                annotation_text = []
+                for i, row in instance.label_df.iterrows():
+                    annotation_dict.append([row["start"], row["end"], row["entity"]])
+                    current_annotation_text = text[row["start"] : row["end"]]
+                    annotation_text.append(current_annotation_text)
+                    if "text" in row and annotation_text[-1] != row["text"]:
+                        print(row)
+                        raise Exception
+            else:
+                annotation_dict = []
+                annotation_text = []
+            annotations.append(
+                {
+                    "text": text,
+                    "labels": annotation_dict,
+                    "label_text": annotation_text,
+                }
+            )
+        return annotations
 
 
 # functions --------------------------------------------------------------------

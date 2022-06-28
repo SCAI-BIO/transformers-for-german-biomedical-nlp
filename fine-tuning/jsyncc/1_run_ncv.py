@@ -9,7 +9,6 @@ from typing import List, Tuple
 
 import click
 
-from toolbox.datasets.sc_dataset import ScDataset
 from toolbox.training.sequence_classification import ScConfig, ScManager
 from toolbox.utils.optimization import hyperparameter_space
 

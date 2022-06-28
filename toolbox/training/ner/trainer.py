@@ -13,7 +13,7 @@ from toolbox.utils.helpers import CallbackDict, TrainerUtils
 from toolbox.utils.metrics import NerMetrics
 from torch.nn import Module
 from torch.utils.data import Dataset
-from transformers import Trainer, TrainerCallback, TrainingArguments
+from transformers import Trainer, TrainerCallback, TrainingArguments, get_scheduler
 from transformers.trainer_utils import BestRun
 
 # globals
@@ -90,6 +90,23 @@ class NerTrainer(object):
         logger.info("Start training")
         self.trainer.train(trial=trial, **kwargs)
 
+    def create_scheduler(
+        self, num_training_steps: int, optimizer: torch.optim.Optimizer = None
+    ):
+        """
+        Setup the scheduler. The optimizer of the trainer must have been set up either before this method is called or
+        passed as an argument.
+        Args:
+            num_training_steps (int): The number of training steps to do.
+        """
+        self.trainer.lr_scheduler = get_scheduler(
+            self.trainer.args.lr_scheduler_type,
+            optimizer=self.trainer.optimizer if optimizer is None else optimizer,
+            num_warmup_steps=self.trainer.args.warmup_steps,
+            num_training_steps=num_training_steps,
+        )
+        return self.trainer.lr_scheduler
+
     def hyperparameter_search(
         self,
         n_trials: int,
@@ -117,6 +134,7 @@ class NerTrainer(object):
     def evaluate(self, dataset: Dataset = None) -> Tuple[Dict, pd.DataFrame]:
         """Evaluation with specified data"""
         logger.info("Start evaluation")
+        self.trainer.model.eval()
         if dataset is None:
             dataset = self.validation_data
         prediction_output = self.trainer.predict(dataset)

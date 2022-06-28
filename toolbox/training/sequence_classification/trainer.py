@@ -7,9 +7,14 @@ import logging
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import optuna
 import pandas as pd
 import torch
+from toolbox.datasets.sc_dataset import FixedSampler, collate_multi
+from toolbox.training.modified_trainer import run_hp_search_optuna
+
+# globals
+from toolbox.utils import CallbackDict, ScMetrics, TrainerUtils
+from toolbox.utils.callbacks import MaxTrialCallback
 from torch import nn
 from torch.cuda.amp import autocast
 from torch.nn import Module
@@ -20,6 +25,7 @@ from transformers import (
     Trainer,
     TrainerCallback,
     TrainingArguments,
+    get_scheduler,
 )
 from transformers.integrations import (
     default_hp_search_backend,
@@ -41,13 +47,6 @@ from transformers.trainer_utils import (
     default_hp_space_optuna,
 )
 
-from toolbox.datasets.sc_dataset import FixedSampler, collate_multi
-from toolbox.training.modified_trainer import run_hp_search_optuna
-
-# globals
-from toolbox.utils import CallbackDict, ScMetrics, TrainerUtils
-from toolbox.utils.callbacks import MaxTrialCallback
-
 logger = logging.getLogger(__name__)
 
 
@@ -57,13 +56,13 @@ logger = logging.getLogger(__name__)
 class ScTrainer(object):
     def __init__(
         self,
-        run_id: int,
         trainer_function: Callable,
         model: Union[Module, Callable],
         callbacks: List[TrainerCallback],
         training_arguments: TrainingArguments,
         training_data: Dataset,
         metric_function: Callable,
+        run_id: int = None,
         validation_data: Dataset = None,
         callable_functions: CallbackDict = None,
         arch: torch.device = torch.device("cpu"),
@@ -118,6 +117,23 @@ class ScTrainer(object):
         logger.info("Start training")
         self.trainer.train(trial=trial)
 
+    def create_scheduler(
+        self, num_training_steps: int, optimizer: torch.optim.Optimizer = None
+    ):
+        """
+        Setup the scheduler. The optimizer of the trainer must have been set up either before this method is called or
+        passed as an argument.
+        Args:
+            num_training_steps (int): The number of training steps to do.
+        """
+        self.lr_scheduler = get_scheduler(
+            self.args.lr_scheduler_type,
+            optimizer=self.optimizer if optimizer is None else optimizer,
+            num_warmup_steps=self.args.warmup_steps,
+            num_training_steps=num_training_steps,
+        )
+        return self.lr_scheduler
+
     def hyperparameter_search(
         self,
         n_trials: int,
@@ -143,19 +159,19 @@ class ScTrainer(object):
     def evaluate(self, dataset):
         """Evaluation with specified data"""
         logger.info("Start evaluation")
+        self.trainer.model.eval()
         predictions = self.trainer.predict(dataset)
         logits = predictions.predictions
         labels, bag_ids = predictions.label_ids
         compute_metrics = ScMetrics()
-        tmp_group = pd.DataFrame(
-            compute_metrics.compute_group_metrics(
-                logits, bag_ids, labels, dataset.num_labels
-            )
+        group_metrics, probs = compute_metrics.compute_group_metrics(
+            logits, bag_ids, labels, dataset.num_labels
         )
+        group_results = pd.DataFrame(group_metrics)
         if id is not None:
             run_name = "Run" + str(self.run_id)
-            tmp_group["run"] = [run_name] * tmp_group.shape[0]
-        return self.trainer.evaluate(dataset), tmp_group
+            group_results["run"] = [run_name] * group_results.shape[0]
+        return self.trainer.evaluate(dataset), group_results
 
 
 class ScMiTrainer(Trainer):
@@ -382,6 +398,7 @@ class ScMiTrainer(Trainer):
             batch_sampler=FixedSampler(eval_dataset, self.args.eval_batch_size),
             collate_fn=collate_multi,
             num_workers=self.args.dataloader_num_workers,
+            shuffle=False,
         )
 
     def get_test_dataloader(self, test_dataset: Dataset) -> DataLoader:
@@ -400,6 +417,7 @@ class ScMiTrainer(Trainer):
             batch_sampler=FixedSampler(test_dataset, self.args.eval_batch_size),
             collate_fn=collate_multi,
             num_workers=self.args.dataloader_num_workers,
+            shuffle=False,
         )
 
     def prediction_loop(

@@ -12,6 +12,7 @@ import torch
 
 from toolbox.training import OptunaTrainer
 from toolbox.training.ner import NerConfig, NerManager
+
 # globals
 from toolbox.utils.optimization import hyperparameter_space
 

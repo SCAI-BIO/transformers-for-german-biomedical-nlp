@@ -3,14 +3,15 @@ import logging
 from typing import Any, Callable, Dict, List, Tuple, Union
 
 import mlflow
+import optuna
 import torch
+
 # from toolbox.training.ganbert import GanBertForTokenClassification
 from sklearn.model_selection import KFold
-from torch.utils.data.dataset import Dataset
-from transformers import PreTrainedModel, Trainer
-from transformers.configuration_utils import PretrainedConfig
-
 from toolbox.training.base_config import BaseConfig
+from torch.utils.data.dataset import Dataset
+from transformers import PreTrainedModel, Trainer, TrainerCallback
+from transformers.configuration_utils import PretrainedConfig
 
 logger = logging.getLogger(__name__)
 
@@ -97,3 +98,32 @@ class ModelLoader:
             )
         logger.info(f"Model of type: {type(model)}")
         return model
+
+
+def check_if_exists(trial: optuna.Trial) -> bool:
+    """Check if trial with the same parameters exists in the study"""
+    params = trial.params
+    study = trial.study
+
+    for strial in study.trials:
+        if trial._trial_id != strial._trial_id and params == strial.params:
+            return True
+
+    return False
+
+
+class MetricLogger(TrainerCallback):
+    def __init__(self, metric: str = "eval_macro_f1", opt_func: Callable = max) -> None:
+        super().__init__()
+        self.metrics = []
+        self.kw = metric
+        self.opt_func = opt_func
+
+    def on_log(self, args, state, control, logs, model=None, **kwargs):
+        for k, v in logs.items():
+            if k == self.kw:
+                self.metrics.append(v)
+
+    @property
+    def best_epoch(self) -> int:
+        return int(self.opt_func(self.metrics) + 1) if len(self.metrics) > 0 else None

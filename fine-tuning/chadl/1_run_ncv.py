@@ -13,9 +13,9 @@ import click
 from transformers import set_seed
 
 from helpers import SEED
-from toolbox.datasets.ner_dataset import NerDataset
 from toolbox.training import OptunaTrainer
 from toolbox.training.ner import NerConfig, NerManager
+
 # global vars ------------------------------------------------------------------
 from toolbox.utils.optimization import hyperparameter_space
 

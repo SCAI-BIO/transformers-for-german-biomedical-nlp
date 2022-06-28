@@ -5,9 +5,8 @@ import logging
 import math
 import os
 import shutil
-from collections import Counter
 from copy import deepcopy
-from typing import Callable, Dict, List, Tuple, Union, Any
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 from uuid import uuid1
 
 import mlflow
@@ -18,16 +17,16 @@ import pandas as pd
 import transformers
 from optuna.pruners import HyperbandPruner
 from pandas import DataFrame
+from toolbox.datasets.ner_dataset import LabelSet, NerDataset
+from toolbox.training.hyperopt import ComputeObjective
+from toolbox.utils.callbacks import EarlyStoppingCallback, LogCallback
+from toolbox.utils.helpers import CallbackDict, MetricLogger, ModelLoader, TrainerUtils
+from toolbox.utils.metrics import NerMetrics
 from torch.nn import Module
 from transformers import AutoConfig, PreTrainedTokenizerFast, TrainingArguments
 from transformers.integrations import MLflowCallback
 from transformers.trainer_utils import HPSearchBackend
 
-from toolbox.datasets.ner_dataset import LabelSet, NerDataset
-from toolbox.training.hyperopt import ComputeObjective
-from toolbox.utils.callbacks import EarlyStoppingCallback, LogCallback
-from toolbox.utils.helpers import CallbackDict, ModelLoader, TrainerUtils
-from toolbox.utils.metrics import NerMetrics
 from .config import NerConfig
 from .trainer import NerTrainer
 
@@ -203,7 +202,10 @@ class NerManager(object):
                 run_id=None,
                 trainer_function=config.trainer_function,
                 model=model,
-                callbacks=[deepcopy(early_stopping_callback)],
+                callbacks=[
+                    deepcopy(early_stopping_callback),
+                    MetricLogger(config.eval_metric),
+                ],
                 training_arguments=training_arguments,
                 training_data=train_data,
                 validation_data=val_data,
@@ -287,7 +289,8 @@ class NerManager(object):
         run_name: str = None,
         pruner: optuna.pruners.BasePruner = optuna.pruners.NopPruner(),
         sampler: optuna.samplers.BaseSampler = None,
-    ) -> tuple[DataFrame, DataFrame, Module | Callable[..., Any]]:
+        trial_dicts: Optional[List[Dict]] = None,
+    ) -> Tuple[DataFrame, DataFrame, Module | Callable[..., Any]]:
 
         assert isinstance(self.data, list), "List of dataset splits must be provided"
         assert isinstance(
@@ -374,96 +377,94 @@ class NerManager(object):
             study_name=study_name,
         )
 
-        assess_function = max if config.greater_is_better else min
+        assess_function = np.argmax if config.greater_is_better else np.argmin
 
         if self.use_mlflow:
-            o = mlflow.start_run(run_name=f"{run_name}-{outer_idx}")
+            parent_run = mlflow.start_run(run_name=f"{run_name}-{outer_idx}")
 
         # trial config
         try:
-            trial_history = {
-                k: v
-                for k, v in Counter(
-                    [t.user_attrs.get("trial_idx", None) for t in study.trials]
-                ).items()
-                if v >= 5
-            }
+            trial_history = [
+                t
+                for t in study.trials
+                if t.state == optuna.trial.TrialState.COMPLETE
+                or t.state == optuna.trial.TrialState.PRUNED
+            ]
             done_trials = len(trial_history)
         except:
             done_trials = 0
+
+        if done_trials == 0:
+            for trial_parameters in trial_dicts:
+                study.enqueue_trial(trial_parameters)
+
+        logger.info(f"Aleardy performed {done_trials} trials")
 
         try:
 
             best_params = study.best_params
             best_metrics = study.best_value
-
-            int_values = study.best_trial.intermediate_values
-            best_epochs = assess_function(int_values, key=int_values.get) + 1
-            del int_values
             all_metrics = []
             all_epochs = []
             all_params = []
 
-            trial_dict = dict()
             for trial in study.trials:
-                trial_index = trial.user_attrs.get("trial_idx", None)
-                if trial_index is not None and trial_index not in trial_dict.keys():
-                    trial_dict[trial_index] = [trial]
-                elif trial_index is not None:
-                    trial_dict[trial_index].append(trial)
-
-            for trial_index, tlist in trial_dict.items():
-                if len(tlist) == config.inner_folds:
-                    metrics = []
-                    epochs = []
-                    trial_params = None
-                    for inner_trial in tlist:
-                        if trial_params is None:
-                            trial_params = inner_trial.params
-
-                        assert inner_trial.params == trial_params
-                        vals = inner_trial.intermediate_values
-                        epochs.append(assess_function(vals, key=vals.get))
-                        metrics.append(max(vals.values()))
-                    all_metrics.append(np.mean(metrics))
-                    all_epochs.append(int(np.mean(epochs)))
+                trial_params = trial.params
+                if trial.user_attrs.get("mean", None) is not None:
+                    all_metrics.append(trial.user_attrs.get("mean", None))
+                    best_fold_epoch = None
+                    best_fold_val = 0 if config.greater_is_better else 1e6
+                    for i in range(config.inner_folds):
+                        fold_epoch = int(
+                            trial.user_attrs.get(f"epoch-{outer_idx}-{i}", None)
+                        )
+                        fold_value = trial.user_attrs.get(
+                            f"metric-{outer_idx}-{i}", None
+                        )
+                        if config.greater_is_better and fold_value > best_fold_val:
+                            best_fold_val = fold_value
+                            best_fold_epoch = fold_epoch
+                        elif (
+                            not config.greater_is_better and fold_value < best_fold_val
+                        ):
+                            best_fold_val = fold_value
+                            best_fold_epoch = fold_epoch
+                    all_epochs.append(best_fold_epoch)
                     all_params.append(trial_params)
-        except:
+
+            index = assess_function(all_metrics)
+            all_epochs[index]
+        except ValueError:
             all_metrics = []
             all_epochs = []
             all_params = []
             best_params = None
             best_metrics = -1 if config.greater_is_better else float("Inf")
-            best_epochs = None
 
         # hyperparameter optimization for n trials over all inner folds
         while done_trials < n_trials:
-            trials = [study.ask() for _ in range(len(inner_data))]
-
-            fold_params = None
-            fold_dist = None
+            current_trial = study.ask()
+            params = self.hp_search_space(current_trial)
             fold_metrics = []
             fold_epochs = []
 
-            for i, ((inner_train_data, inner_val_data), current_trial) in enumerate(
-                zip(inner_data, trials)
-            ):
+            current_trial.set_user_attr("trial_idx", done_trials)
+            current_trial.set_user_attr("outer_ids", outer_idx)
+
+            training_arguments = self.add_params_to_targs(
+                training_arguments,
+                params,
+                config.max_epochs,
+                eval=True,
+            )
+            for i, (inner_train_data, inner_val_data) in enumerate(inner_data):
                 exp_name = f"{study_name}: Trial {outer_idx}-{i}-{done_trials}-{uuid1().hex[:6]}"
-                if fold_params is None:
-                    fold_params = self.hp_search_space(current_trial)
-                    fold_dist = current_trial.distributions
-                else:
-                    self.set_params(current_trial, fold_params, fold_dist)
-
-                current_trial.set_user_attr("inner_idx", i)
-                current_trial.set_user_attr("trial_idx", done_trials)
-                current_trial.set_user_attr("outer_ids", outer_idx)
-
+                metric_logger = MetricLogger(config.eval_metric, assess_function)
                 trainer_instance = NerTrainer(
                     run_id=i,
                     trainer_function=config.trainer_function,
                     model=model_initiator,
-                    callbacks=[deepcopy(early_stopping_callback)],
+                    callbacks=[deepcopy(early_stopping_callback), metric_logger],
                     training_arguments=training_arguments,
                     training_data=inner_train_data,
                     validation_data=inner_val_data,
@@ -474,7 +475,7 @@ class NerManager(object):
                         [
                             LogCallback(
                                 save_model=False,
-                                parent_run=o,
+                                parent_run=parent_run,
                                 run_name=exp_name,
                             )
                         ]
@@ -489,23 +490,17 @@ class NerManager(object):
                 trainer_instance.trainer.hp_space = lambda x: x.params
                 trainer_instance.trainer.compute_objective = compute_objective
 
-                try:
-                    trainer_instance.train(current_trial)
-                except optuna.TrialPruned:
-                    logger.info(f"Trial was pruned (State: {current_trial}")
+                trainer_instance.train()
 
                 metrics = trainer_instance.evaluate(inner_val_data)
                 trainer_instance.objective = compute_objective(metrics[0])
 
-                intermediate_values = current_trial.storage.get_trial(
-                    current_trial._trial_id
-                ).intermediate_values
-                best_epoch = (
-                    assess_function(intermediate_values, key=intermediate_values.get)
-                    + 1
-                )
+                best_epoch = metric_logger.best_epoch
                 fold_epochs.append(best_epoch)
-                current_trial.set_user_attr("best_epoch", best_epoch)
+                current_trial.set_user_attr(f"epoch-{outer_idx}-{i}", best_epoch)
+                current_trial.set_user_attr(
+                    f"metric-{outer_idx}-{i}", float(trainer_instance.objective)
+                )
                 fold_metrics.append(trainer_instance.objective)
 
                 shutil.rmtree(out_folder)
@@ -513,46 +508,34 @@ class NerManager(object):
                     f"hyperparameters of best run: {fold_metrics[-1]} at {outer_idx}-{i}"
                 )
 
-            for i, (trial, metric) in enumerate(zip(trials, fold_metrics)):
-                if i == 0:
-                    study.tell(trial, metric)
-                else:
-                    study.tell(trial, metric)
+            best_fold = assess_function(fold_metrics)
+            selected_epoch = fold_epochs[best_fold]
+            avg_metrics = np.nanmean(fold_metrics)
 
-            avg_metrics = np.mean(fold_metrics)
-            avg_epoch = int(np.mean(fold_epochs))
+            current_trial.set_user_attr(f"mean", np.nanmean(fold_metrics))
+            current_trial.set_user_attr(f"std", np.nanstd(fold_metrics))
+            current_trial.set_user_attr(f"epoch", selected_epoch)
+            study.tell(current_trial, avg_metrics)
 
             all_metrics.append(avg_metrics)
-            all_epochs.append(avg_epoch)
-            all_params.append(trial.params)
+            all_epochs.append(selected_epoch)
+            all_params.append(current_trial.params)
 
             if (config.greater_is_better and avg_metrics > best_metrics) or (
                 not config.greater_is_better and avg_metrics < best_metrics
             ):
                 best_metrics = avg_metrics
-                best_epochs = avg_epoch
-                best_params = fold_params
+                best_params = current_trial.params
 
             done_trials += 1
 
         # training of final model on whole data
         # preparation of training parameters
-        hf_training_args: Dict = training_arguments.to_dict()
-        hf_training_args = {
-            key: value
-            for key, value in hf_training_args.items()
-            if key[0] != "_" and value != -1
-        }
-        hf_training_args["save_strategy"] = "no"
-        hf_training_args["evaluation_strategy"] = "no"
-        hf_training_args["do_eval"] = False
-        hf_training_args["num_train_epochs"] = max(best_epochs, 1)
-
-        for parameter, value in best_params.items():
-            hf_training_args[parameter] = value
-
-        training_arguments = TrainingArguments(**hf_training_args)
-        logger.info(f"{outer_idx}: {training_arguments}")
+        training_arguments = self.add_params_to_targs(
+            training_arguments,
+            best_params,
+            config.max_epochs,
+        )
 
         # training
         trainer_instance = NerTrainer(
@@ -567,7 +550,7 @@ class NerManager(object):
                 [
                     LogCallback(
                         save_model=True,
-                        parent_run=o,
+                        parent_run=parent_run,
                         run_name=f"Trial {str(outer_idx)}-final",
                     )
                 ]
@@ -578,7 +561,15 @@ class NerManager(object):
             metric_function=None,  # type: ignore
             arch=config.arch,
         )
-
+        trainer_instance.trainer.create_optimizer()
+        max_steps = (
+            math.ceil(len(train) / training_arguments.per_device_train_batch_size)
+            * config.max_epochs
+        )
+        trainer_instance.create_scheduler(
+            num_training_steps=max_steps,
+            optimizer=trainer_instance.trainer.optimizer,
+        )
         trainer_instance.train()
 
         # evaluation
@@ -640,3 +631,21 @@ class NerManager(object):
             tokenizer = tokenizer_fct.from_pretrained(self.model_path)
             logger.info("Load tokenizer from pretrained model.")
         return tokenizer
+
+    @staticmethod
+    def add_params_to_targs(training_arguments, params, epochs, eval: bool = False):
+        targs: Dict = training_arguments.to_dict()
+        targs = {
+            key: value for key, value in targs.items() if key[0] != "_" and value != -1
+        }
+        if not eval:
+            targs["save_strategy"] = "no"
+            targs["evaluation_strategy"] = "no"
+            targs["do_eval"] = False
+        targs["num_train_epochs"] = max(epochs, 1)
+
+        for parameter, value in params.items():
+            targs[parameter] = value
+
+        training_arguments = TrainingArguments(**targs)
+        return training_arguments

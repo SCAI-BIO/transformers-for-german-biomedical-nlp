@@ -167,8 +167,9 @@ class NerMetrics:
 class ScMetrics:
     """Metrics for sequence classification"""
 
-    def __init__(self, eps: float = 1e-9) -> None:
+    def __init__(self, eps: float = 1e-9, average: str = "micro") -> None:
         self.eps = eps
+        self.average = average
 
     def __call__(self, predictions: EvalPrediction, num_labels: int) -> Dict[str, any]:
         logits = predictions.predictions
@@ -187,24 +188,9 @@ class ScMetrics:
         instance_logits = sigmoid(instance_logits)
         preds = np.where(instance_logits > 0.5, 1, 0)
         precision, recall, f1, support = sm.precision_recall_fscore_support(
-            labels, preds, average="samples"
+            labels, preds, average=self.average
         )
         return {"f1": f1, "recall": recall, "precision": precision, "support": support}
-
-    # def compute_overall_metrics(
-    #     self,
-    #     logits: torch.Tensor,
-    #     bag_ids: torch.Tensor,
-    #     labels: torch.Tensor,
-    #     label_range: int,
-    # ) -> Tuple[float, float, float]:
-    #     f1, recall, precision = f_measure(logits, bag_ids, labels, self.eps)
-    #     return (
-    #         f1,
-    #         recall,
-    #         precision,
-    #         multi_label_accuracy(logits, bag_ids, labels, self.eps),
-    #     )
 
     @staticmethod
     def compute_group_metrics(
@@ -224,9 +210,12 @@ class ScMetrics:
                 for instance_id in np.unique(bag_ids)
             ]
         )
-        instance_logits = sigmoid(instance_logits)
-        preds = np.where(instance_logits > 0.5, 1, 0)
-        return sm.classification_report(labels, preds, output_dict=True)
+        probs = sigmoid(instance_logits)
+        preds = np.where(probs > 0.5, 1, 0)
+        return (
+            sm.classification_report(labels, preds, output_dict=True),
+            instance_logits,
+        )
 
 
 def sigmoid(x):

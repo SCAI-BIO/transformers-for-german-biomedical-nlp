@@ -12,6 +12,8 @@ class ScConfig(TrainingConfig):
     results_dir: str = None
     early_stopping_patience: int = 15
     early_stopping_threshold: float = 0.1
+    early_stopping_metric: str = None
+    early_stopping_greater_is_better: str = None
     greater_is_better: bool = True
     eval_metric: str = "f1"
     eval_strategy: str = "epoch"
@@ -28,3 +30,7 @@ class ScConfig(TrainingConfig):
         self.entity_results_file = str(
             results_dir / f"{self.results_prefix}_{self.model_name}_groups.csv",
         )
+
+        if self.early_stopping_metric is None:
+            self.early_stopping_metric = self.eval_metric
+            self.early_stopping_greater_is_better = self.greater_is_better

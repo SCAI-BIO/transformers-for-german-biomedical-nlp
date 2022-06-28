@@ -26,7 +26,10 @@ transformer-based language models specific to the biomedical domain.
 │   │       ├── config
 │   │       ├── processed
 │   │       └── raw
-│   └── jsyncc
+│   │── jsyncc
+│   |   └── data
+│   │       └── config
+│   └── clef
 │       └── data
 │           └── config
 ├── pre-training                            # Directory which contains the scripts to pre-train BioGottBERT and BioELECTRA
@@ -43,11 +46,11 @@ transformer-based language models specific to the biomedical domain.
 
 ## Data availability
 
-Unfortunately, the pre-training and the ChaDL datasets are not publicly available. However, the BRONCO150, GGPONC, and
-JSynCC dataset can be acquired. The [BRONCO150](https://www2.informatik.hu-berlin.de/~leser/bronco/index.html)
+Unfortunately, the pre-training and the ChaDL datasets are not publicly available. However, the BRONCO150, CLEF eHealth 2019, GGPONC, and
+JSynCC datasets can be acquired. The [BRONCO150](https://www2.informatik.hu-berlin.de/~leser/bronco/index.html)
 and [GGPONC](https://www.leitlinienprogramm-onkologie.de/projekte/ggponc-english/) datasets can be requested by the
 authors directly, and [the JSynCC repository](https://github.com/JULIELab/jsyncc) provides code to generate the JSynCC
-dataset.
+dataset. The [CLEF eHealth 2019](https://clefehealth.imag.fr/?page_id=171) dataset can be downloaded directly.
 
 ## Sharing the pre-trained models
 

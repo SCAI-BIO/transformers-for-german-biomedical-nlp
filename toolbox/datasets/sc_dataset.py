@@ -13,10 +13,9 @@ from typing import Dict, List, Tuple
 
 import torch
 from sklearn.preprocessing import MultiLabelBinarizer
-from torch.utils.data import Dataset, Sampler
-
 from toolbox.datasets import TOKENIZERS
 from toolbox.utils import TrainerUtils
+from torch.utils.data import Dataset, Sampler
 
 # globals
 
@@ -98,8 +97,9 @@ class ScDataset(Dataset):
     def __add__(self, other: "ScDataset") -> "ScDataset":
         self.instances.extend(other.instances)
 
-        self.label_set = self.generate_label_set()
-        self.num_labels = len(self.label_set)
+        if self.label_set is None:
+            self.label_set = self.generate_label_set()
+            self.num_labels = len(self.label_set)
         return self
 
     def __getitem__(self, item):
@@ -107,7 +107,12 @@ class ScDataset(Dataset):
         tokens = torch.tensor(self.instances[item].tokens)
         attn = torch.tensor(self.instances[item].attention_mask)
         labels = self.instances[item].label
-        out = {"input_ids": tokens, "attention_mask": attn, "labels": labels}
+        out = {
+            "input_ids": tokens,
+            "attention_mask": attn,
+            "labels": labels,
+            "doc_id": self.instances[item].doc_id,
+        }
         return out
 
     def subset(self, indices: List[int]) -> "ScDataset":
@@ -121,8 +126,9 @@ class ScDataset(Dataset):
         self,
         tokenizer: TOKENIZERS,
         max_length: int,
-        min_freq: int,
+        min_freq: int = None,
         unique_labels: bool = False,
+        label_set: Dict[str, int] = None,
     ):
         """Prepares the data for training after the object has been initialized"""
         self.min_freq = min_freq
@@ -133,14 +139,18 @@ class ScDataset(Dataset):
                 if len(instance.label_names) > 1:  # type: ignore
                     instance.label_names = None
             self._remove_instances()
+        if min_freq is not None:
+            label_count = self.count_labels()
+            labels_to_keep = [
+                label for label, count in label_count.items() if count >= min_freq
+            ]
+            self._remove_labels(labels_to_keep)
 
-        label_count = self.count_labels()
-        labels_to_keep = [
-            label for label, count in label_count.items() if count >= min_freq
-        ]
-        self._remove_labels(labels_to_keep)
-
-        self.label_set = self.generate_label_set()
+        if label_set is not None:
+            self.label_set = label_set
+            self.num_labels = len(label_set)
+        else:
+            self.label_set = self.generate_label_set()
         for instance in self.instances:
             instance.tokenize(tokenizer, max_length)
             instance.set_label(self.label_set)
@@ -188,21 +198,6 @@ class ScDataset(Dataset):
             k: v
             for k, v in sorted(labels.items(), key=lambda item: item[1], reverse=True)
         }
-
-    # def get_sequence_lengths(self):
-    #     """Get sequence lengths of all instances (raw input, words)"""
-    #     return [len(instance.raw_tokens) for instance in self.instances]
-
-    # def get_sequence_distribution(self):
-    #     dist = {}
-    #     for data in self:
-    #         num_seq = len(data["input_ids"])
-    #         if num_seq not in dist.keys():
-    #             dist[num_seq] = 1
-    #         else:
-    #             dist[num_seq] += 1
-    #
-    #     return dist
 
     def generate_label_set(self):
         """Generate a dictionary with the topic names and their ids"""
@@ -322,13 +317,27 @@ class ScDataset(Dataset):
             for inner_train_idx, inner_val_idx in TrainerUtils.calculate_splits(
                 train_data, inner_folds
             ):
-                inner_train_data = dataset.subset(inner_train_idx)
-                inner_val_data = dataset.subset(inner_val_idx)
+                inner_train_data = train_data.subset(inner_train_idx)
+                inner_val_data = train_data.subset(inner_val_idx)
                 inner_datasets.append((inner_train_data, inner_val_data))
 
             datasets.append((train_data, val_data, inner_datasets))
 
         return datasets
+
+    def to_dictionaries(self) -> List[Dict]:
+        """Extract sentences from list of training instances"""
+        instances = []
+        for instance in self.instances:
+            labels = instance.label_names
+            text = instance.text
+            instances.append(
+                {
+                    "text": text,
+                    "labels": labels,
+                }
+            )
+        return instances
 
 
 class FixedSampler(Sampler):
@@ -384,17 +393,20 @@ def collate_multi(batch):
     batch_attentions = []
     batch_ids = []
     batch_labels = []
+    batch_dids = []
 
     for i, sample in enumerate(batch):
         batch_tokens.append(sample["input_ids"])
         batch_attentions.append(sample["attention_mask"])
         batch_ids.extend([i] * len(sample["input_ids"]))
         batch_labels.append(sample["labels"])
+        batch_dids.extend([int(sample["doc_id"])] * len(sample["input_ids"]))
 
     out_tokens = torch.cat(batch_tokens, dim=0)
     out_attentions = torch.cat(batch_attentions, dim=0)
     out_ids = torch.tensor(batch_ids)
     out_labels = torch.stack(batch_labels)
+    torch.tensor(batch_dids)
 
     return {
         "input_ids": out_tokens,

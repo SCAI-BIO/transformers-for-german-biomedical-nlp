@@ -4,7 +4,6 @@
 import os
 from typing import Callable, Dict, Optional, Union
 
-import optuna
 from transformers import Trainer
 from transformers.integrations import (
     default_hp_search_backend,
